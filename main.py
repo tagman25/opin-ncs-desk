@@ -33,7 +33,7 @@ from dryad_parser import DryadParser, DryadTable
 from net_state import NetState
 from protocol import (
     interpret_line, script_open, script_agency, script_traffic, script_checkin,
-    script_close_net, script_close_station, script_zks, script_imi,
+    script_close_net, script_close_station, script_zks, script_imi, volunteer_group,
 )
 
 # Optional FLDigi integration (graceful if not running)
@@ -117,6 +117,9 @@ class OpinNCSApp(QMainWindow):
 
         self.lbl_dryad_status = QLabel("No DRYAD loaded")
         top.addWidget(self.lbl_dryad_status)
+        self.used_label = QLabel("No combinations spent")
+        self.used_label.setObjectName("muted")
+        top.addWidget(self.used_label)
 
         top.addStretch()
         self.mode_combo = QComboBox()
@@ -369,6 +372,16 @@ class OpinNCSApp(QMainWindow):
         self.refresh_zks_display()
         self.refresh_traffic_display()
         self.refresh_log()
+        self.refresh_used()
+
+    def refresh_used(self):
+        n = len(self.net.used_groups)
+        if n == 0:
+            self.used_label.setText("No combinations spent")
+        elif n == 1:
+            self.used_label.setText("1 combination spent")
+        else:
+            self.used_label.setText(f"{n} combinations spent")
 
     def _extract_flamp_filename(self, line: str) -> Optional[str]:
         """Pull a filename from an FLAMP-style line (File : name.txt or <FILE ...>)."""
@@ -493,7 +506,24 @@ class OpinNCSApp(QMainWindow):
         self.refresh_log()
 
     def prepare_open(self):
-        self._offer(script_open(self.net.ncs_callsign))
+        """ZKA ZKB, plus a ZNB from today's DRYAD so the net can check net control."""
+        self.apply_callsign()
+        znb = None
+        if self.current_dryad:
+            znb = None
+            group = volunteer_group(
+                self.current_dryad.rows, self.net.used_groups, self.current_dryad.authenticate
+            )
+            if group:
+                self.net.used_groups.add(group[:2])
+                znb = group
+                self.net.log(f"Opened with ZNB {znb}. That combination cannot be used again.")
+            else:
+                self.net.log("No unused DRYAD combination left for the open")
+        else:
+            self.net.log("Opened without a ZNB — load today's DRYAD first")
+        self._offer(script_open(self.net.ncs_callsign, znb))
+        self.refresh_used()
 
     def prepare_agency(self):
         self._offer(script_agency(self.net.ncs_callsign))

@@ -52,6 +52,7 @@ class NetState:
         self.log_entries: List[dict] = []
         self.last_tx: str = ""
         self.band: str = ""
+        self.used_groups: Set[str] = set()
 
     def log(self, message: str, source: str = "SYSTEM"):
         self.log_entries.append({

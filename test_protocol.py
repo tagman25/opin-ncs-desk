@@ -8,7 +8,8 @@ from dryad_parser import DryadTable
 from datetime import datetime
 from net_state import NetState
 from protocol import (
-    extract_speaker, interpret_line, script_zks, generate_challenge, triplet_is_valid,
+    extract_speaker, interpret_line, script_zks, script_open, generate_challenge,
+    triplet_is_valid, volunteer_group,
 )
 
 # October 1 row A is IZRE... and the letter under A/I is Y (parser self-test).
@@ -79,6 +80,21 @@ def main():
     interpret_line(net, "N8TAG DE KE8YTX ZBO 1 P WD8SAB K", table, True)
     interpret_line(net, "N8TAG DE KE8YTX ZBO 1 P WD8SAB K", table, True)
     assert len(net.traffic_items) + len(net.completed_traffic) == before + 1
+
+    # A combination used by one station cannot be reused by another.
+    # ZND 2 is "check the authentication of your last transmission", then a new INT ZNB.
+    other = interpret_line(net, f"N8TAG DE W1AW ZKE ZNB {good} K", table, True)
+    assert "W1AW" not in net.zks_order
+    assert other.startswith("W1AW DE N8TAG ZND 2 INT ZNB "), other
+    new_pair = other.split()[-1]
+    assert new_pair != good[:2]
+    assert new_pair in net.used_groups
+
+    opened = volunteer_group(table.rows, net.used_groups, table.authenticate)
+    assert opened and opened[:2] not in net.used_groups
+    net.used_groups.add(opened[:2])
+    text = script_open("N8TAG", opened)
+    assert text == f"OPIN DE N8TAG ZKA ZKB ZNB {opened} AS"
 
     zks = script_zks("N8TAG", net.zks_order)
     assert zks.startswith("OPIN DE N8TAG ZKS ")

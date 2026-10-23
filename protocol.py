@@ -134,18 +134,44 @@ def parse_zbo(line: str):
     return (qty, prec, dest)
 
 
-def generate_challenge(rows: dict) -> Optional[str]:
+def generate_challenge(rows: dict, used=None) -> Optional[str]:
     """
     A two-letter INT ZNB challenge: a row letter plus a letter that sits in
     that row. The correct reply is the letter directly under it (see DryadTable).
     Row Y is avoided so the reply does not have to wrap.
+    Combinations already in `used` are skipped. A combination may be used once.
     """
-    choices = [r for r in rows.keys() if r != "Y" and len(rows[r]) == 25]
-    if not choices:
+    spent = set(used or [])
+    options = []
+    for row, letters in rows.items():
+        if row == "Y" or len(letters) != 25:
+            continue
+        for letter in letters:
+            pair = f"{row}{letter}"
+            if pair not in spent:
+                options.append(pair)
+    if not options:
         return None
-    row = random.choice(choices)
-    letter = random.choice(rows[row])
-    return f"{row}{letter}"
+    return random.choice(options)
+
+
+def take_challenge(rows: dict, used: set) -> Optional[str]:
+    """Pick an unused combination and mark it spent."""
+    pair = generate_challenge(rows, used)
+    if pair:
+        used.add(pair)
+    return pair
+
+
+def volunteer_group(rows: dict, used, authenticate_fn) -> Optional[str]:
+    """A three-letter ZNB the station can check: authentication of AB is C."""
+    pair = generate_challenge(rows, used)
+    if not pair:
+        return None
+    answer = authenticate_fn(pair[0], pair[1])
+    if not answer:
+        return None
+    return pair + answer
 
 
 def triplet_is_valid(rows_auth, group: str) -> bool:
@@ -159,8 +185,13 @@ def triplet_is_valid(rows_auth, group: str) -> bool:
     return bool(expected) and expected == group[2]
 
 
-def script_open(ncs: str) -> str:
-    """Digital net-up call from the control script."""
+def script_open(ncs: str, znb: Optional[str] = None) -> str:
+    """
+    Digital net-up call. ZKA says we are net control, ZKB says the net is
+    directed, and ZNB is our own DRYAD so the other stations can check us.
+    """
+    if znb:
+        return f"OPIN DE {ncs} ZKA ZKB ZNB {znb} AS"
     return f"OPIN DE {ncs} ZKA ZKB AS"
 
 
@@ -258,22 +289,22 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
             net.stations[speaker].last_volunteered_znb = group
         authed = False
         if ncs_mode and group and len(group) == 3 and dryad is not None:
-            if triplet_is_valid(dryad.authenticate, group):
+            pair = group[:2]
+            spent = pair in net.used_groups
+            if triplet_is_valid(dryad.authenticate, group) and not spent:
+                net.used_groups.add(pair)
                 net.mark_authenticated(speaker)
                 authed = True
                 net.log(f"{speaker} volunteered ZNB {group} — matches the DRYAD", source=speaker)
             else:
-                challenge = generate_challenge(dryad.rows)
+                challenge = take_challenge(dryad.rows, net.used_groups)
                 if challenge and speaker in net.stations:
                     net.stations[speaker].last_challenge = challenge
-                # ZND 2: the authenticator they just sent does not check (SOI).
                 suggestion = script_challenge(ncs, speaker, challenge or "??", znd="2")
-                net.log(
-                    f"{speaker} volunteered ZNB {group} — does not match. Suggested ZND 2.",
-                    source=speaker,
-                )
+                why = "that combination was already used" if spent else "does not match"
+                net.log(f"{speaker} volunteered ZNB {group} — {why}. Suggested ZND 2.", source=speaker)
         elif ncs_mode and dryad is not None and speaker in net.stations and not net.stations[speaker].authenticated:
-            challenge = generate_challenge(dryad.rows)
+            challenge = take_challenge(dryad.rows, net.used_groups)
             if challenge:
                 net.stations[speaker].last_challenge = challenge
                 suggestion = script_challenge(ncs, speaker, challenge)
@@ -297,7 +328,7 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
                 suggestion = script_ack(ncs, speaker)
                 net.log(f"{speaker} authenticated with ZNB {group}", source=speaker)
             else:
-                challenge = generate_challenge(dryad.rows)
+                challenge = take_challenge(dryad.rows, net.used_groups)
                 if challenge:
                     st.last_challenge = challenge
                     suggestion = script_challenge(ncs, speaker, challenge, znd="2")

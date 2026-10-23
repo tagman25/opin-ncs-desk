@@ -40,6 +40,7 @@ class TrafficItem:
     completed: bool = False
     notes: str = ""
     queue: Optional[str] = None
+    serial: Optional[str] = None
     missing: Dict[str, str] = field(default_factory=dict)
 
 
@@ -149,40 +150,51 @@ class NetState:
                 return
         self.log(f"ZOF seen for {file_name} with no open ZBO")
 
-    def record_zev(self, callsign: str, file_name: Optional[str] = None, negative: bool = False):
+    def record_zev(self, callsign: str, file_name: Optional[str] = None, negative: bool = False, serial: Optional[str] = None):
         """
         ZEV = received. ZUG ZEV = do not acknowledge (SOI), which this net
         treats as 'I do not have the file' so it can go out on Winlink later.
+        A 3-to-5 digit serial (ZEV 7547) is matched to that message only.
         When every station on the ZKS roll has answered, the listing leaves
         the active list.
         """
         callsign = callsign.upper()
         target = None
-        if file_name:
+        if serial:
+            for item in self.traffic_items:
+                if item.serial == serial or item.queue == serial or (item.file_name and serial in item.file_name):
+                    target = item
+                    break
+            if target is None:
+                self.log(f"{callsign} sent {'ZUG ZEV' if negative else 'ZEV'} {serial} but that serial is not open")
+                return
+        if target is None and file_name:
             for item in self.traffic_items:
                 if item.file_name == file_name:
                     target = item
                     break
-        if target is None:
+        if target is None and not serial:
             for item in reversed(self.traffic_items):
                 if item.zof_sent and not item.completed:
                     target = item
                     break
-        if target is None and self.traffic_items:
+        if target is None and not serial and self.traffic_items:
             target = self.traffic_items[-1]
         if target is None:
             self.log(f"{callsign} sent {'ZUG ZEV' if negative else 'ZEV'} but no traffic is open")
             return
         if file_name and not target.file_name:
             target.file_name = file_name
+        if serial and serial != target.queue and not target.serial:
+            target.serial = serial
         if negative:
             target.not_received_by.add(callsign)
             target.received_by.discard(callsign)
-            self.log(f"{callsign} ZUG ZEV — does not have {target.file_name or target.destination}")
+            self.log(f"{callsign} ZUG ZEV — does not have {target.serial or target.file_name or target.destination}")
         else:
             target.received_by.add(callsign)
             target.not_received_by.discard(callsign)
-            self.log(f"{callsign} ZEV — has {target.file_name or target.destination}")
+            self.log(f"{callsign} ZEV — has {target.serial or target.file_name or target.destination}")
         answered = target.received_by | target.not_received_by
         if target.zof_sent and set(self.zks_order).issubset(answered) and self.zks_order:
             target.completed = True

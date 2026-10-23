@@ -194,15 +194,16 @@ def script_open(ncs: str, znb: Optional[str] = None) -> str:
 
 
 def script_agency(ncs: str) -> str:
-    return f"OPIN DE {ncs} INT AGENCY K"
+    # ZKA ZKB stays on the calls, the way the nets in the logs actually do it.
+    return f"OPIN DE {ncs} ZKA ZKB INT AGENCY K"
 
 
 def script_traffic(ncs: str) -> str:
-    return f"OPIN DE {ncs} INT ZBO K"
+    return f"OPIN DE {ncs} ZKA ZKB INT ZBO K"
 
 
 def script_checkin(ncs: str) -> str:
-    return f"OPIN DE {ncs} INT ZKE K"
+    return f"OPIN DE {ncs} ZKA ZKB INT ZKE K"
 
 
 def script_close_net(ncs: str) -> str:
@@ -240,6 +241,22 @@ def script_challenge(ncs: str, station: str, challenge: str, znd: Optional[str] 
     return f"{station} DE {ncs} {prefix}INT ZNB {challenge}"
 
 
+def _zug_znb(text: str) -> bool:
+    """
+    True for 'ZUG ZNB' when the next word is not a DRYAD triplet.
+    QRU and ZBO are three letters, but they are prowords, not the authenticator.
+    'ZUG IP ZNB WOL' is not this case: WOL is the triplet.
+    """
+    words = {"K", "AR", "AS", "QRU", "ZBO", "ZOF", "ZKE", "ZEV", "ZOK", "INT", "IP", "R", "P"}
+    tokens = text.split()
+    for i in range(len(tokens) - 1):
+        if tokens[i] == "ZUG" and tokens[i + 1] == "ZNB":
+            nxt = tokens[i + 2] if i + 2 < len(tokens) else ""
+            if not nxt or nxt in words or not re.fullmatch(r"[A-Z]{3}", nxt):
+                return True
+    return False
+
+
 def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
     """
     Update net state from one received line and return a suggested reply,
@@ -248,6 +265,9 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
     Nothing in here transmits. The GUI puts the suggestion in the edit box.
     """
     text = " ".join(line.upper().split())
+    text = re.sub(r"\bZEV(\d{3,5})\b", r"ZEV \1", text)
+    text = re.sub(r"\bZOF(\d{3,5})\b", r"ZOF \1", text)
+    text = re.sub(r"\bZND(\d)\b", r"ZND \1", text)
     if len(text) < 4:
         return None
 
@@ -256,30 +276,52 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
     is_us = speaker == ncs
     suggestion = None
 
-    from explain import file_start, listings_of, missing_blocks, relayed_calls
+    from explain import file_start, listings_of, missing_blocks, relayed_calls, zev_serials, _called
 
     started = file_start(line)
     if started:
         target = None
         for item in net.traffic_items:
-            if (not started["sender"] or item.originator == started["sender"]) and (
-                not started["destination"] or item.destination == started["destination"]
-            ):
+            sender_ok = (not started["sender"] or item.originator == started["sender"])
+            dest_ok = (not started["destination"] or item.destination == started["destination"])
+            if sender_ok and dest_ok:
                 target = item
                 break
+        if target is None and started.get("serial"):
+            target = next((item for item in reversed(net.traffic_items) if item.zof_sent and not item.serial), None)
         if target:
             target.file_name = started["file"]
-            target.queue = started["queue"]
+            target.queue = started["queue"] or target.queue
+            target.serial = started.get("serial") or target.serial
             target.zof_sent = True
-            net.log(f"File {started['file']} queue {started['queue'] or '-'}")
+            net.log(f"File {started['file']} serial {started.get('serial') or '-'} queue {started['queue'] or '-'}")
     miss = missing_blocks(line)
-    if miss and miss["station"]:
-        net.note_missing(miss["station"], miss["blocks"], miss["queue"])
+    if miss:
+        # No callsign on a FLAMP line means the operator at this computer.
+        who = miss["station"] or net.ncs_callsign
+        if miss.get("confirmed"):
+            net.record_zev(who, serial=miss["queue"])
+        elif miss["station"] or miss["queue"] or miss["blocks"]:
+            net.note_missing(who, miss["blocks"], miss["queue"])
 
     # Our own echo can still be the ZOF that directed a relay.
     if "ZOF" in text and "INT" not in text:
         zofs = [item for item in listings_of(text) if item["kind"] == "ZOF"]
-        if zofs:
+        if zofs and zofs[0].get("serials"):
+            directed = zofs[0]
+            for serial in directed["serials"]:
+                matched = next((item for item in net.traffic_items if item.serial == serial or serial in (item.file_name or "")), None)
+                if matched is None:
+                    matched = next((item for item in net.traffic_items if not item.zof_sent and item.originator == directed["owner"]), None)
+                if matched:
+                    matched.zof_sent = True
+                    matched.serial = serial
+                    if directed["destination"] != "OPIN":
+                        matched.destination = directed["destination"]
+                    net.log(f"Directed serial {serial}")
+                else:
+                    net.log(f"ZOF serial {serial} — no open listing yet")
+        elif zofs:
             directed = zofs[0]
             matched = None
             for item in net.traffic_items:
@@ -303,8 +345,10 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
 
     # A station asking us to say again: offer the last thing we prepared.
     if speaker and not is_us and "IMI" in text.split():
-        net.log(f"{speaker} sent IMI — say again", source=speaker)
-        if net.last_tx:
+        called = _called(text)
+        net.log(f"{speaker} sent IMI — say again" + (f" to {called}" if called else ""), source=speaker)
+        # Resend only when the repeat was asked of this station.
+        if called == ncs and net.last_tx:
             return net.last_tx
 
     if is_us or speaker is None:
@@ -312,18 +356,19 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
         return suggestion
 
     # ZUG ZNB — onto the ZKS list with no DRYAD check.
-    if "ZUG" in text and "ZNB" in text and "ZEV" not in text:
+    # "ZUG IP ZNB WOL" is not this. WOL is a real group.
+    if _zug_znb(text) and "ZEV" not in text:
         net.mark_zug_znb(speaker)
         suggestion = script_ack(ncs, speaker)
 
-    # Check-in. A volunteered ZNB ABC is checked before a new challenge is made.
-    elif "ZKE" in text and "INT" not in text and relayed_calls(text):
+    # Check-in. Relayed stations are logged, but only the speaker's own
+    # ZNB is checked. A volunteered ZNB ABC is checked before a new challenge.
+    elif "ZKE" in text and "INT" not in text:
         for ident in relayed_calls(text):
             already = net.stations.get(ident)
             if not already or not already.authenticated:
                 net.check_in(ident, f"reported by {speaker}")
             net.log(f"{speaker} reported {ident}", source=speaker)
-    elif "ZKE" in text and "INT" not in text:
         net.check_in(speaker, text)
         group = extract_znb_group(text)
         if group and len(group) == 3 and speaker in net.stations:
@@ -351,7 +396,7 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
                 suggestion = script_challenge(ncs, speaker, challenge)
                 net.log(f"Suggested INT ZNB {challenge} for {speaker}")
         if authed:
-            own = next((item for item in listings_of(text) if item["kind"] == "ZBO"), None)
+            own = next((item for item in listings_of(text) if item["kind"] == "ZBO" and item["owner"] == speaker), None)
             if own and "QRU" not in text:
                 suggestion = script_ack_traffic(ncs, speaker, own["quantity"], own["precedence"], own["destination"])
             else:
@@ -393,7 +438,27 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
 
     # Receipt. ZUG ZEV = do not acknowledge = did not get the file.
     if "ZEV" in text and "INT" not in text:
-        net.record_zev(speaker, file_name=extract_filename(text), negative=("ZUG" in text))
+        clauses = text.split(" DE ")[1:]
+        if len(clauses) > 1:
+            for clause in clauses:
+                tokens = clause.split()
+                from explain import station_id
+                call = station_id(tokens[0]) if tokens else None
+                body = " ".join(tokens[1:])
+                if call and "ZEV" in body:
+                    serials = zev_serials(body)
+                    if serials:
+                        for serial in serials:
+                            net.record_zev(call, negative=("ZUG" in body), serial=serial)
+                    else:
+                        net.record_zev(call, file_name=extract_filename(text), negative=("ZUG" in body))
+        else:
+            serials = zev_serials(text)
+            if serials:
+                for serial in serials:
+                    net.record_zev(speaker, negative=("ZUG" in text), serial=serial)
+            else:
+                net.record_zev(speaker, file_name=extract_filename(text), negative=("ZUG" in text))
 
     if "CONFIRMED" in text:
         filename = extract_filename(text)

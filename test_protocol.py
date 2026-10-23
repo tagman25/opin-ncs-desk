@@ -121,6 +121,36 @@ def main():
     interpret_line(net, "OPIN DE N8TAG INT ZKE K", table, True)
     assert "N8TAG" not in net.stations
 
+    # A real check-in from the logs: IP WL2K and the speaker's ZNB come
+    # before the stations he is reporting. The ZBO belongs to the last of those.
+    live = "WD8SDH DE KE8NHT ZKE IP WL2K ZNB NHI QRU W8SGM/FCEMHS/WL2K KE8FMJ/WL2K QRU KC3QVF/WL2K ZBO 1 P WXOBSREP ZOK IP ZBO 1 R QSPEDITOR ZOK IP K"
+    live_meaning = explain_line(live)
+    assert "W8SGM/FCEMHS/WL2K" in live_meaning
+    assert "KC3QVF/WL2K" in live_meaning and "Priority" in live_meaning
+    live_net = NetState("WD8SDH")
+    interpret_line(live_net, live, table, True)
+    assert any(t.originator == "KC3QVF/WL2K" and t.destination == "WXOBSREP" and t.precedence == "P" for t in live_net.traffic_items)
+    assert "KC3QVF/WL2K" not in live_net.zks_order
+
+    # ZOF 7547 is a serial, not 7547 messages.
+    assert explain_line("KE8NHT DE N8ADO ZOF 7547 N2QFD K") == "N8ADO directs KE8NHT to send serial 7547 to N2QFD."
+
+    from explain import file_start
+    started = file_start("<FILE 58 431B>{1740}20260111180736:US--READYX-7547-R-ZEU-ALTTP2-1463.TXT")
+    assert started["serial"] == "7547" and started["queue"] == "1740" and started["destination"] == "READYX"
+
+    assert "confirmed" in explain_line("<MISSING 15 A772>{1740}CONFIRMED").lower()
+    assert "serial 7547" in explain_line("N8ADO DE K8ZD ZEV 7547 AR")
+
+    # ZUG IP ZNB ABC is a real authenticator, not "I cannot authenticate".
+    fresh = NetState("N8TAG")
+    interpret_line(fresh, f"K8BCI DE KE8NHT ZKE WL2K ZUG IP ZNB {good} QRU K", table, True)
+    assert not fresh.stations["KE8NHT"].zug_znb
+    assert "KE8NHT" in fresh.zks_order
+
+    from protocol import script_checkin
+    assert script_checkin("N8TAG") == "OPIN DE N8TAG ZKA ZKB INT ZKE K"
+
     print("all protocol checks passed")
     print("sample ZKS:", zks)
     print("follow-up:", net.get_completed_summary()[-1])

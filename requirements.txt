@@ -1,3 +1,9 @@
+# requirements.txt
+# Dependencies for the OPIN NCS Console
+# Install with: pip install -r requirements.txt
+
 pdfplumber>=0.10.0
+# For the GUI (choose one; PyQt6 is preferred for richer widgets)
 PyQt6>=6.6.0
+# Optional but useful
 requests>=2.31.0

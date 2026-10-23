@@ -11,6 +11,7 @@ from protocol import (
     extract_speaker, interpret_line, script_zks, script_open, generate_challenge,
     triplet_is_valid, volunteer_group,
 )
+from explain import explain_line
 
 # October 1 row A is IZRE... and the letter under A/I is Y (parser self-test).
 ROWS = {
@@ -95,6 +96,18 @@ def main():
     net.used_groups.add(opened[:2])
     text = script_open("N8TAG", opened)
     assert text == f"OPIN DE N8TAG ZKA ZKB ZNB {opened} AS"
+
+    relay = "WD8SDH DE KE8NHT ZKE AD8CM/WL2K N8ADO/WL2K QRU KC3QVF/WL2K ZBO 1 WXOBSREP ZOK IP ZBO 1 R QSPEDITOR ZOK IP K"
+    meaning = explain_line(relay)
+    assert "reports check-ins for AD8CM/WL2K, N8ADO/WL2K, KC3QVF/WL2K" in meaning
+    assert "WXOBSREP" in meaning and "QSPEDITOR" in meaning and "Routine" in meaning
+    assert "ZOF 1P" not in meaning
+    assert explain_line("K8BCI DE WD8SDH ZOF 1P READYX K") == "WD8SDH directs K8BCI to send one Priority message to READYX."
+    relay_net = NetState("WD8SDH")
+    interpret_line(relay_net, relay, table, True)
+    assert "KC3QVF/WL2K" in relay_net.stations
+    assert "KC3QVF/WL2K" not in relay_net.zks_order
+    assert any(t.originator == "KC3QVF/WL2K" and t.destination == "QSPEDITOR" for t in relay_net.traffic_items)
 
     zks = script_zks("N8TAG", net.zks_order)
     assert zks.startswith("OPIN DE N8TAG ZKS ")

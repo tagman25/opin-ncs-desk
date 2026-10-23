@@ -39,6 +39,8 @@ class TrafficItem:
     zof_sent: bool = False
     completed: bool = False
     notes: str = ""
+    queue: Optional[str] = None
+    missing: Dict[str, str] = field(default_factory=dict)
 
 
 class NetState:
@@ -187,6 +189,28 @@ class NetState:
             self.completed_traffic.append(target)
             self.traffic_items.remove(target)
             self.log(f"Completed {target.file_name or target.destination} — on the Winlink follow-up list")
+
+    def note_missing(self, callsign: str, blocks: str, queue: Optional[str] = None):
+        """Record blocks a station still needs. Used when the print is only partly readable."""
+        callsign = callsign.upper()
+        target = None
+        if queue:
+            for item in self.traffic_items:
+                if item.queue == queue:
+                    target = item
+                    break
+        if target is None:
+            for item in reversed(self.traffic_items):
+                if item.zof_sent:
+                    target = item
+                    break
+        if target is None and self.traffic_items:
+            target = self.traffic_items[-1]
+        if target is None:
+            self.log(f"{callsign} missing blocks, but no file is open")
+            return
+        target.missing[callsign] = blocks
+        self.log(f"{callsign} missing blocks {blocks or '(none listed)'}")
 
     def mark_complete(self, index: int) -> bool:
         """Move a listing to follow-up even if some stations have not answered."""

@@ -185,6 +185,13 @@ class OpinNCSApp(QMainWindow):
         self.rx_text = QTextEdit()
         self.rx_text.setReadOnly(True)
         center.addWidget(self.rx_text, 2)
+        self.btn_interpret = QPushButton("Interpret")
+        self.btn_interpret.clicked.connect(self.interpret_rx)
+        center.addWidget(self.btn_interpret)
+        center.addWidget(QLabel("Meaning"))
+        self.meaning_text = QTextEdit()
+        self.meaning_text.setReadOnly(True)
+        center.addWidget(self.meaning_text, 1)
 
         center.addWidget(QLabel("Suggested reply — edit, then send"))
         self.response_edit = QTextEdit()
@@ -209,6 +216,18 @@ class OpinNCSApp(QMainWindow):
         self.btn_complete = QPushButton("Move selected to follow-up")
         self.btn_complete.clicked.connect(self.complete_selected)
         right.addWidget(self.btn_complete)
+        right.addWidget(QLabel("If the print is garbled, record the blocks you can read"))
+        gap = QHBoxLayout()
+        self.gap_call = QLineEdit()
+        self.gap_call.setPlaceholderText("Callsign")
+        self.gap_blocks = QLineEdit()
+        self.gap_blocks.setPlaceholderText("Missing blocks, or blank if nothing received")
+        gap.addWidget(self.gap_call)
+        gap.addWidget(self.gap_blocks)
+        right.addLayout(gap)
+        self.btn_gap = QPushButton("Record missing blocks")
+        self.btn_gap.clicked.connect(self.record_gap)
+        right.addWidget(self.btn_gap)
         self.follow_hint = QLabel("Finished files are on the Follow-up tab.")
         self.follow_hint.setWordWrap(True)
         right.addWidget(self.follow_hint)
@@ -359,7 +378,11 @@ class OpinNCSApp(QMainWindow):
         list. The suggestion is only placed in the edit box — nothing is sent.
         """
         self.apply_callsign()
+        from explain import explain_line
+        meanings = []
         for raw_line in text.splitlines():
+            if raw_line.strip():
+                meanings.append(explain_line(raw_line))
             suggestion = interpret_line(
                 self.net,
                 raw_line,
@@ -369,6 +392,8 @@ class OpinNCSApp(QMainWindow):
             if suggestion:
                 self.response_edit.setPlainText(suggestion)
                 self.net.last_tx = suggestion
+        if meanings:
+            self.meaning_text.append("\n\n".join(meanings))
         self.refresh_zks_display()
         self.refresh_traffic_display()
         self.refresh_log()
@@ -567,6 +592,22 @@ class OpinNCSApp(QMainWindow):
         self.refresh_traffic_display()
         self.refresh_log()
 
+    def interpret_rx(self):
+        """Explain the print in the RX box without transmitting."""
+        from explain import explain_line
+        lines = [explain_line(line) for line in self.rx_text.toPlainText().splitlines() if line.strip()]
+        self.meaning_text.setPlainText("\n\n".join(lines) or "Nothing to read.")
+
+    def record_gap(self):
+        """Operator override when FLDigi could not print every block."""
+        call = self.gap_call.text().strip().upper()
+        if not call:
+            self.statusBar().showMessage("Enter the station that is missing blocks")
+            return
+        self.net.note_missing(call, self.gap_blocks.text().strip())
+        self.refresh_traffic_display()
+        self.refresh_log()
+
     def refresh_zks_display(self):
         """Pending stations stay off the roll until ZNB checks or they send ZUG ZNB."""
         self.pending_list.clear()
@@ -600,6 +641,9 @@ class OpinNCSApp(QMainWindow):
             )
             if item.file_name:
                 base = f"[{item.file_name}] " + base
+            if item.missing:
+                holes = " ".join(f"{call}:{blocks}" for call, blocks in item.missing.items())
+                base = base + f"  missing[{holes}]"
             self.traffic_list.addItem(base)
         self.completed_list.clear()
         for summary in self.net.get_completed_summary():

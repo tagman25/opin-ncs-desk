@@ -64,10 +64,8 @@ def extract_speaker(line: str) -> Optional[str]:
     after = text.split(" DE ", 1)[1].strip().split()
     if not after:
         return None
-    cand = normalize_call(after[0])
-    if looks_like_callsign(cand):
-        return cand
-    return None
+    from explain import station_id
+    return station_id(after[0])
 
 
 def extract_znb_group(line: str) -> Optional[str]:
@@ -216,8 +214,9 @@ def script_close_station(ncs: str, station: str) -> str:
 
 
 def script_zks(ncs: str, calls) -> str:
-    """Roll call. Callsigns only — no authentication tags."""
-    body = " ".join(calls)
+    """Roll call. Callsigns only, with net control marked /NCS at the end."""
+    roll = [call for call in calls if call != ncs]
+    body = " ".join([*roll, f"{ncs}/NCS"])
     return f"OPIN DE {ncs} ZKS {body}".rstrip()
 
 
@@ -257,14 +256,50 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
     is_us = speaker == ncs
     suggestion = None
 
+    from explain import file_start, listings_of, missing_blocks, relayed_calls
+
+    started = file_start(line)
+    if started:
+        target = None
+        for item in net.traffic_items:
+            if (not started["sender"] or item.originator == started["sender"]) and (
+                not started["destination"] or item.destination == started["destination"]
+            ):
+                target = item
+                break
+        if target:
+            target.file_name = started["file"]
+            target.queue = started["queue"]
+            target.zof_sent = True
+            net.log(f"File {started['file']} queue {started['queue'] or '-'}")
+    miss = missing_blocks(line)
+    if miss and miss["station"]:
+        net.note_missing(miss["station"], miss["blocks"], miss["queue"])
+
     # Our own echo can still be the ZOF that directed a relay.
     if "ZOF" in text and "INT" not in text:
-        filename = extract_filename(text)
-        if filename:
-            net.mark_zof(filename)
-        elif net.traffic_items:
-            net.traffic_items[-1].zof_sent = True
-            net.log("ZOF noted for the current traffic")
+        zofs = [item for item in listings_of(text) if item["kind"] == "ZOF"]
+        if zofs:
+            directed = zofs[0]
+            matched = None
+            for item in net.traffic_items:
+                if item.originator == directed["owner"] and item.destination == directed["destination"] and not item.zof_sent:
+                    matched = item
+                    break
+            if matched is None:
+                matched = next((item for item in net.traffic_items if not item.zof_sent), None)
+            if matched:
+                matched.zof_sent = True
+                net.log(f"Directed {directed['owner']} to send {directed['quantity']} {directed['precedence']} {directed['destination']}")
+            else:
+                net.log("ZOF seen with no open traffic")
+        else:
+            filename = extract_filename(text)
+            if filename:
+                net.mark_zof(filename)
+            elif net.traffic_items:
+                net.traffic_items[-1].zof_sent = True
+                net.log("ZOF noted for the current traffic")
 
     # A station asking us to say again: offer the last thing we prepared.
     if speaker and not is_us and "IMI" in text.split():
@@ -282,6 +317,12 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
         suggestion = script_ack(ncs, speaker)
 
     # Check-in. A volunteered ZNB ABC is checked before a new challenge is made.
+    elif "ZKE" in text and "INT" not in text and relayed_calls(text):
+        for ident in relayed_calls(text):
+            already = net.stations.get(ident)
+            if not already or not already.authenticated:
+                net.check_in(ident, f"reported by {speaker}")
+            net.log(f"{speaker} reported {ident}", source=speaker)
     elif "ZKE" in text and "INT" not in text:
         net.check_in(speaker, text)
         group = extract_znb_group(text)
@@ -310,9 +351,9 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
                 suggestion = script_challenge(ncs, speaker, challenge)
                 net.log(f"Suggested INT ZNB {challenge} for {speaker}")
         if authed:
-            zbo = parse_zbo(text)
-            if zbo and "QRU" not in text:
-                suggestion = script_ack_traffic(ncs, speaker, *zbo)
+            own = next((item for item in listings_of(text) if item["kind"] == "ZBO"), None)
+            if own and "QRU" not in text:
+                suggestion = script_ack_traffic(ncs, speaker, own["quantity"], own["precedence"], own["destination"])
             else:
                 suggestion = script_ack(ncs, speaker)
 
@@ -340,14 +381,15 @@ def interpret_line(net, line: str, dryad, ncs_mode: bool) -> Optional[str]:
                 )
 
     # Traffic listing, including one that arrived on the check-in line.
-    zbo = parse_zbo(text)
-    if zbo and "INT" not in text:
-        qty, prec, dest = zbo
-        net.add_traffic(speaker, qty, prec, dest, text)
-        # If we already decided to challenge, leave that suggestion alone.
-        # If we have not suggested anything and they are already in the net, ack the listing.
-        if suggestion is None and speaker in net.zks_order and "ZKE" not in text:
-            suggestion = script_ack_traffic(ncs, speaker, qty, prec, dest)
+    for item in listings_of(text):
+        if item["kind"] != "ZBO" or "INT" in text:
+            continue
+        owner = item["owner"] or speaker
+        if not owner:
+            continue
+        net.add_traffic(owner, item["quantity"], item["precedence"], item["destination"], text)
+        if suggestion is None and owner == speaker and speaker in net.zks_order and "ZKE" not in text:
+            suggestion = script_ack_traffic(ncs, speaker, item["quantity"], item["precedence"], item["destination"])
 
     # Receipt. ZUG ZEV = do not acknowledge = did not get the file.
     if "ZEV" in text and "INT" not in text:
